@@ -1,6 +1,8 @@
 from flask import Flask, request, jsonify
 from models import db, Product, Inventory, InventoryTransaction, Warehouse, Supplier, ProductSupplier
 from datetime import datetime, timedelta
+from decimal import Decimal
+from sqlalchemy.exc import IntegrityError
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stockflow.db'
@@ -24,30 +26,46 @@ def home():
         ]
     }
 
-
 @app.route('/api/products', methods=['POST'])
 def create_product():
     data = request.json
 
-    if not data.get('name') or not data.get('sku'):
-        return {"error": "Missing fields"}, 400
+    # Validate required fields
+    required_fields = ['name', 'sku', 'price']
+    for field in required_fields:
+        if field not in data:
+            return {"error": f"{field} is required"}, 400
 
-    existing = Product.query.filter_by(sku=data['sku']).first()
-    if existing:
-        return {"error": "SKU already exists"}, 409
+    try:
+        with db.session.begin():  # atomic transaction
 
-    product = Product(
-        name=data['name'],
-        sku=data['sku'],
-        price=data.get('price', 0),
-        company_id=data.get('company_id')
-    )
+            # Check SKU uniqueness
+            existing = Product.query.filter_by(sku=data['sku']).first()
+            if existing:
+                return {"error": "SKU already exists"}, 409
 
-    db.session.add(product)
-    db.session.commit()
+            product = Product(
+                name=data['name'],
+                sku=data['sku'],
+                price=Decimal(str(data['price'])),
+                company_id=data.get('company_id')
+            )
 
-    return {"message": "Product created", "id": product.id}
+            db.session.add(product)
+            db.session.flush()  # get ID without committing
 
+        return {
+            "message": "Product created",
+            "product_id": product.id
+        }, 201
+
+    except IntegrityError:
+        db.session.rollback()
+        return {"error": "Database integrity error"}, 500
+
+    except Exception:
+        db.session.rollback()
+        return {"error": "Unexpected error occurred"}, 500
 
 @app.route('/api/inventory/transaction', methods=['POST'])
 def update_inventory():
